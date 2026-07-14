@@ -69,7 +69,7 @@ import {
 import { Worker, AttendanceRecord, WeeklyReport, PettyCashReport, PettyCashTransaction, TransactionType, BankStatementReport } from "./types";
 import { INITIAL_WORKERS, INDONESIAN_DAYS, COMMON_CATEGORIES } from "./constants";
 import { triggerExcelDownload } from "./lib/excelGenerator";
-import { triggerAttendanceExcelDownload, printWeeklyReportPDF } from "./lib/attendanceSheetGenerator";
+import { triggerAttendanceExcelDownload, printWeeklyReportPDF, generateAttendanceExcelBlob } from "./lib/attendanceSheetGenerator";
 import { getOrCreateFolder, getOrCreateNestedFolder, uploadFileToDrive, exportAttendanceToGoogleSheet } from "./lib/googleWorkspace";
 import { initAuth, googleSignIn, googleSignOut } from "./lib/firebase";
 
@@ -79,6 +79,46 @@ function formatLocalYYYYMMDD(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+// Extract Year and Month Name in Indonesian from a period or date string
+function parseYearAndMonthFromPeriod(periodText: string): { targetYear: string; targetMonth: string } {
+  const cleanPeriod = periodText || "";
+  
+  // 1. Try to extract 4-digit year
+  const yearMatch = cleanPeriod.match(/\b(20\d{2})\b/);
+  const targetYear = yearMatch ? yearMatch[1] : new Date().getFullYear().toString();
+  
+  // 2. Try to extract Indonesian month name
+  const monthsIndo = [
+    "Januari", "Februari", "Maret", "April", "Mei", "Juni", 
+    "Juli", "Agustus", "September", "Oktober", "November", "Desember"
+  ];
+  
+  let targetMonth = "";
+  for (const m of monthsIndo) {
+    if (cleanPeriod.toLowerCase().includes(m.toLowerCase())) {
+      targetMonth = m;
+      break;
+    }
+  }
+  
+  // 3. If still empty, check English months
+  if (!targetMonth) {
+    const monthsEng = [
+      "January", "February", "March", "April", "May", "June", 
+      "July", "August", "September", "October", "November", "December"
+    ];
+    const idx = monthsEng.findIndex(m => cleanPeriod.toLowerCase().includes(m.toLowerCase()));
+    if (idx !== -1) {
+      targetMonth = monthsIndo[idx];
+    } else {
+      // Default to current month name in Indonesian
+      targetMonth = new Date().toLocaleString("id-ID", { month: "long" });
+    }
+  }
+  
+  return { targetYear, targetMonth };
 }
 
 // Helper to sort transactions putting "Saldo Awal" at the very top, and then the rest by date ascending
@@ -789,12 +829,12 @@ export default function App() {
           
           try {
             // 1. Generate Report
-            const newReport = {
+            const newReport: WeeklyReport = {
               id: Date.now().toString(),
               weekStartDate: monday,
               weekEndDate: friday,
               records: attendanceRecords,
-              createdAt: Date.now(), isSubmitted: true,
+              isSubmitted: true,
             };
 
             const updatedReports = [newReport, ...weeklyReports];
@@ -821,8 +861,36 @@ export default function App() {
               const fileName = `Rekap_Uang_Makan_${monday}_${friday}.pdf`;
               const monthName = today.toLocaleString('id-ID', {month: 'long'});
               const folderYear = today.getFullYear().toString();
-              const folderId = await getOrCreateNestedFolder(googleToken, ["Laporan Uang Makan PT. NMSA", folderYear, monthName]);
-              await uploadFileToDrive(googleToken, folderId, fileName, pdfBlob);
+              const periodFolderName = `Periode ${monday} s.d. ${friday}`;
+              
+              const folderId = await getOrCreateNestedFolder(googleToken, [
+                "Laporan Absensi PT. NMSA",
+                folderYear,
+                monthName,
+                periodFolderName
+              ]);
+              const pdfResult = await uploadFileToDrive(googleToken, folderId, fileName, pdfBlob);
+              newReport.pdfDriveUrl = pdfResult.webViewLink;
+              newReport.driveFileId = folderId;
+              newReport.driveUrl = folderId;
+
+              // Also auto-upload Excel copy
+              try {
+                const excelBlob = generateAttendanceExcelBlob(monday, friday, attendanceRecords, workers);
+                const excelResult = await uploadFileToDrive(googleToken, folderId, `Rekap_Uang_Makan_${monday}_to_${friday}.xlsx`, excelBlob);
+                newReport.excelDriveUrl = excelResult.webViewLink;
+              } catch (excelErr) {
+                console.error("Auto Excel upload failed", excelErr);
+              }
+
+              // Update Firebase and local state with the Google Drive links
+              try {
+                const { db } = await import('./lib/firebase');
+                const { doc, setDoc } = await import('firebase/firestore');
+                await setDoc(doc(db, "weekly_reports", newReport.id), newReport);
+              } catch (updateFbErr) {
+                console.error("Firebase update failed", updateFbErr);
+              }
               
               alert("Laporan hari Jumat berhasil dibuat otomatis dan disimpan di Google Drive!");
             } catch (driveErr) {
@@ -1426,6 +1494,7 @@ export default function App() {
           ];
         });
 
+        // 1. Export to Google Sheet
         const sheetResult = await exportAttendanceToGoogleSheet(
           googleToken,
           sheetTitle,
@@ -1433,13 +1502,44 @@ export default function App() {
           rows
         );
         newReport.sheetsUrl = sheetResult.spreadsheetUrl;
-        alert(`Sukses! Laporan berhasil divalidasi, diunduh sebagai Excel, dan diexport langsung ke dokumen Google Sheets baru: ${sheetTitle}`);
+
+        // 2. Export PDF and Excel to GDrive folders
+        const reportDate = new Date(weekStart);
+        const folderYear = reportDate.getFullYear().toString();
+        const monthName = reportDate.toLocaleString('id-ID', { month: 'long' });
+        const periodFolderName = `Periode ${weekStart} s.d. ${weekEnd}`;
+
+        const folderId = await getOrCreateNestedFolder(googleToken, [
+          "Laporan Absensi PT. NMSA",
+          folderYear,
+          monthName,
+          periodFolderName
+        ]);
+
+        // Upload Excel format
+        const excelBlob = generateAttendanceExcelBlob(weekStart, weekEnd, thisWeeksRecords, workers);
+        const excelResult = await uploadFileToDrive(googleToken, folderId, `Rekap_Uang_Makan_${weekStart}_to_${weekEnd}.xlsx`, excelBlob);
+        newReport.excelDriveUrl = excelResult.webViewLink;
+
+        // Upload PDF format
+        try {
+          const { generateWeeklyReportPDFBlob } = await import('./lib/attendanceSheetGeneratorPDF');
+          const pdfBlob = generateWeeklyReportPDFBlob(newReport, workers);
+          const pdfResult = await uploadFileToDrive(googleToken, folderId, `Rekap_Uang_Makan_${weekStart}_${weekEnd}.pdf`, pdfBlob);
+          newReport.pdfDriveUrl = pdfResult.webViewLink;
+          newReport.driveFileId = folderId;
+          newReport.driveUrl = folderId;
+        } catch (pdfErr) {
+          console.error("PDF upload failed", pdfErr);
+        }
+
+        alert(`Sukses! Laporan berhasil divalidasi, diunduh sebagai Excel, diexport ke Google Sheets: "${sheetTitle}", serta file PDF & Excel berhasil terunggah aman ke Google Drive Anda di folder: "Laporan Absensi PT. NMSA > ${folderYear} > ${monthName} > ${periodFolderName}"`);
       } catch (err: any) {
         console.error("Failed to automatically post to sheets", err);
-        alert(`Laporan tersimpan secara lokal dan diunduh ke komputer Anda, namun gagal sinkronisasi ke Google Sheets: ${err.message}. Pastikan Token Google Anda masih valid.`);
+        alert(`Laporan tersimpan secara lokal dan diunduh ke komputer Anda, namun gagal sinkronisasi ke Google Sheets/Drive: ${err.message}. Pastikan Token Google Anda masih valid.`);
       }
     } else {
-      alert("Laporan Uang Makan Mingguan berhasil disimpan dan terunduh otomatis ke komputer Anda! Silakan hubungkan Google Sheets di pojok kanan atas jika Anda ingin pencatatan otomatis di Cloud.");
+      alert("Laporan Uang Makan Mingguan berhasil disimpan dan terunduh otomatis ke komputer Anda! Silakan hubungkan Google Sheets/Drive di pojok kanan atas jika Anda ingin pencatatan otomatis di Cloud.");
     }
 
     setWeeklyReports([newReport, ...weeklyReports]);
@@ -1677,10 +1777,12 @@ export default function App() {
       const bankName = activeBankStatement.summary.bankName || "Bank Lain";
       const periodName = activeBankStatement.summary.period || "Mei 2026";
       
+      const { targetYear, targetMonth } = parseYearAndMonthFromPeriod(periodName);
+
       const periodFolderId = await getOrCreateNestedFolder(googleToken, [
-        "Laporan Rekening Koran",
-        companyName,
-        bankName,
+        "Laporan Rekening Koran PT. NMSA",
+        targetYear,
+        targetMonth,
         periodName
       ]);
 
@@ -1703,7 +1805,7 @@ export default function App() {
       setBankStatements(bankStatements.map(s => s.id === updated.id ? updated : s));
       setCloudSyncStatus({ status: "success", msg: targetFileName });
 
-      alert(`Sukses! Laporan rekening koran berhasil diconvert menjadi Excel (.xlsx), kemudian diunggah secara aman dan otomatis tersimpan rapi ke akun Google Drive Anda dalam folder: "Laporan Rekening Koran > ${companyName} > ${bankName} > ${periodName}"`);
+      alert(`Sukses! Laporan rekening koran berhasil diconvert menjadi Excel (.xlsx), kemudian diunggah secara aman dan otomatis tersimpan rapi ke akun Google Drive Anda dalam folder: "Laporan Rekening Koran PT. NMSA > ${targetYear} > ${targetMonth} > ${periodName}"`);
 
     } catch (err: any) {
       console.error(err);
@@ -2045,15 +2147,19 @@ export default function App() {
 
       // 2. Search or Create nested folders in GDrive
       const holderName = activeWorkspaceReport.summary.workerName || "Karyawan Lapangan";
-      const monthFolderName = `Petty Cash - ${activeWorkspaceReport.summary.reportMonth || 'Belum Terkategori'}`;
+      const reportMonth = activeWorkspaceReport.summary.reportMonth || "Mei 2026";
+      
+      const { targetYear, targetMonth } = parseYearAndMonthFromPeriod(reportMonth);
+
       const monthFolderId = await getOrCreateNestedFolder(googleToken, [
-        "Laporan Petty Cash Lapangan",
-        holderName,
-        monthFolderName
+        "Laporan Petty Cash PT. NMSA",
+        targetYear,
+        targetMonth,
+        holderName
       ]);
 
       // 3. Save the file inside this monthly child folder
-      const targetFileName = `Laporan_PettyCash_${holderName}_${(activeWorkspaceReport.summary.reportMonth || "Belum_Terkategori").replace(" ", "_")}.xlsx`;
+      const targetFileName = `Laporan_PettyCash_${holderName}_${(reportMonth).replace(" ", "_")}.xlsx`;
       
       const uploadResult = await uploadFileToDrive(googleToken, monthFolderId, targetFileName, excelBlob);
 
@@ -2068,7 +2174,7 @@ export default function App() {
       setPettyCashReports(pettyCashReports.map(r => r.id === updated.id ? updated : r));
       setCloudSyncStatus({ status: "success", msg: targetFileName });
 
-      alert(`Sukses! Laporan petty cash berhasil diconvert menjadi Excel (.xlsx), kemudian diunggah secara aman dan otomatis tersimpan rapi ke akun Google Drive Anda dalam folder: "Laporan Petty Cash Lapangan > ${holderName} > ${monthFolderName}"`);
+      alert(`Sukses! Laporan petty cash berhasil diconvert menjadi Excel (.xlsx), kemudian diunggah secara aman dan otomatis tersimpan rapi ke akun Google Drive Anda dalam folder: "Laporan Petty Cash PT. NMSA > ${targetYear} > ${targetMonth} > ${holderName}"`);
 
     } catch (err: any) {
       console.error(err);

@@ -38,6 +38,10 @@ export interface WeeklyReport {
   isSubmitted: boolean;
   submittedAt?: string;
   sheetsUrl?: string; // If exported to Google Sheets
+  driveFileId?: string;
+  driveUrl?: string;
+  pdfDriveUrl?: string;
+  excelDriveUrl?: string;
 }
 
 export interface PettyCashTransaction {
