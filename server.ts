@@ -365,6 +365,56 @@ const OFFICE_LAT = -6.244342;
 const OFFICE_LON = 106.843073;
 const MAX_DISTANCE_METERS = 150;
 
+// Array of dynamic templates to prevent WhatsApp spam/block detection
+const REMINDER_TEMPLATES = [
+  (name: string, url: string) => `Halo *${name}*! 👋
+
+Sudah masuk jam kerja nih. Yuk, sempatkan waktu sebentar untuk klik tautan di bawah ini agar absensi harian Anda langsung tercatat otomatis:
+👉 ${url}
+
+Pastikan GPS/lokasi di handphone Anda menyala ya saat membukanya. Terima kasih dan selamat beraktivitas! Semangat terus! ✨💼`,
+
+  (name: string, url: string) => `Selamat pagi *${name}*! ☀️
+
+Semoga hari ini menyenangkan dan penuh berkah! Untuk kelancaran rekap uang makan harian Anda, silakan lakukan presensi cepat melalui link di bawah:
+👉 ${url}
+
+Cukup klik link tersebut, sistem akan memverifikasi lokasi Anda secara instan. Terima kasih atas kerja keras Anda di lapangan! Jaga keselamatan selalu! 🛠️💪`,
+
+  (name: string, url: string) => `Halo Rekan *${name}*, apa kabar hari ini? 😊
+
+Jangan lupa untuk mencatatkan kehadiran Anda hari ini demi kelancaran administrasi harian. Klik link di bawah ini untuk check-in instan tanpa ribet:
+👉 ${url}
+
+Selamat bekerja dan tetap utamakan keselamatan kerja di lokasi! Sukses selalu! 🚀🔥`,
+
+  (name: string, url: string) => `Semangat pagi *${name}*! 🌟
+
+Mari kita mulai hari kerja dengan penuh energi positif! Agar data allowance-meal Anda tercatat dengan rapi, silakan absen dengan mengklik link instan berikut:
+👉 ${url}
+
+Hanya butuh beberapa detik saja! Terima kasih banyak atas dedikasinya untuk tim! 💼🤝`,
+
+  (name: string, url: string) => `Pemberitahuan Presensi Harian - *${name}* 📍
+
+Yth. Rekan Karyawan, silakan klik tautan presensi di bawah untuk mencatat kehadiran Anda pada hari kerja ini:
+👉 ${url}
+
+Sistem akan memproses titik lokasi Anda dalam hitungan detik. Semoga pekerjaan hari ini berjalan dengan lancar dan aman! Terus berikan yang terbaik! 👍📦`,
+
+  (name: string, url: string) => `Halo *${name}*! Salam sukses untuk Anda hari ini! 🏆
+
+Sebelum memulai aktivitas kerja lebih jauh, mohon kesediaan waktunya untuk melakukan absen harian dengan mengetuk link di bawah ini:
+👉 ${url}
+
+Satu klik untuk mempermudah pencatatan uang makan Anda. Terima kasih, tetap fokus dan selalu jaga keselamatan kerja! 🏁❤️`
+];
+
+function getRandomReminderMessage(name: string, url: string): string {
+  const randomIndex = Math.floor(Math.random() * REMINDER_TEMPLATES.length);
+  return REMINDER_TEMPLATES[randomIndex](name, url);
+}
+
 function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371e3; // metres
   const phi1 = (lat1 * Math.PI) / 180;
@@ -544,6 +594,183 @@ app.post("/api/self-attend", async (req, res) => {
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message || "Gagal melakukan absen mandiri" });
+  }
+});
+
+// POST Quick/Instant Attendance Check-in via Bot link
+app.post("/api/quick-self-attend", async (req, res) => {
+  try {
+    const { workerId, date, latitude, longitude, status } = req.body;
+    if (!workerId || !date) {
+      return res.status(400).json({ error: "ID karyawan dan tanggal wajib diisi." });
+    }
+
+    const state = readState();
+    const workers = state.workers || [];
+    const worker = workers.find((w: any) => w.id === workerId && w.isActive);
+    if (!worker) {
+      return res.status(404).json({ error: "Karyawan tidak ditemukan atau status tidak aktif." });
+    }
+
+    const workerName = worker.name;
+
+    // Check time limits: Working days, closing time is 19:00 WIB (7 PM)
+    const timeDetails = getJakartaTimeDetails();
+    if (timeDetails.isWorkingDay && timeDetails.hour >= 19) {
+      return res.status(403).json({ 
+        error: "Gagal absen: Absen Mandiri telah ditutup! Batas waktu absensi mandiri di hari kerja adalah pukul 19.00 WIB. Jika Anda lupa melakukan absen hari ini, silakan hubungi Mandor." 
+      });
+    }
+
+    const records = state.attendanceRecords || [];
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+    if (status === "Hadir") {
+      if (latitude === undefined || longitude === undefined) {
+        return res.status(400).json({ error: "Verifikasi lokasi GPS wajib diaktifkan untuk melakukan presensi mandiri." });
+      }
+
+      const distance = calculateDistance(latitude, longitude, OFFICE_LAT, OFFICE_LON);
+      const address = await getReverseGeocode(latitude, longitude);
+
+      if (!state.attendanceLogs) {
+        state.attendanceLogs = [];
+      }
+
+      if (distance > MAX_DISTANCE_METERS) {
+        state.attendanceLogs.unshift({
+          id: "LOG-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
+          workerId,
+          workerName,
+          date,
+          time: timeStr,
+          latitude,
+          longitude,
+          distance: Math.round(distance),
+          address,
+          status: "DITOLAK_LOKASI"
+        });
+        if (state.attendanceLogs.length > 500) {
+          state.attendanceLogs = state.attendanceLogs.slice(0, 500);
+        }
+        writeState(state);
+
+        return res.json({ 
+          success: false, 
+          reason: "OUTSIDE",
+          distance: Math.round(distance)
+        });
+      }
+
+      // Inside range! Mark Present
+      let recordUpdated = false;
+      for (const r of records) {
+        if (r.workerId === workerId) {
+          if (!r.attendance) r.attendance = {};
+          r.attendance[date] = true;
+          // Clear custom status
+          if (r.customStatus && r.customStatus[date]) delete r.customStatus[date];
+          if (r.reasons && r.reasons[date]) delete r.reasons[date];
+          recordUpdated = true;
+          break;
+        }
+      }
+
+      if (!recordUpdated) {
+        records.push({
+          workerId,
+          attendance: { [date]: true },
+          dailyAllowance: 25000
+        });
+      }
+
+      state.attendanceLogs.unshift({
+        id: "LOG-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
+        workerId,
+        workerName,
+        date,
+        time: timeStr,
+        latitude,
+        longitude,
+        distance: Math.round(distance),
+        address,
+        status: "BERHASIL"
+      });
+      if (state.attendanceLogs.length > 500) {
+        state.attendanceLogs = state.attendanceLogs.slice(0, 500);
+      }
+
+      writeState({
+        ...state,
+        attendanceRecords: records
+      });
+
+      return res.json({
+        success: true,
+        message: `Absen Berhasil! Halo *${workerName}*, presensi kehadiran Anda hari ini tanggal *${date}* berhasil dicatat secara otomatis karena lokasi Anda berada di jangkauan kantor (jarak: *${Math.round(distance)}* meter dari kantor).`
+      });
+
+    } else {
+      // Non-present status
+      let recordUpdated = false;
+      for (const r of records) {
+        if (r.workerId === workerId) {
+          if (!r.attendance) r.attendance = {};
+          r.attendance[date] = false;
+
+          if (!r.customStatus) r.customStatus = {};
+          r.customStatus[date] = status;
+
+          if (!r.reasons) r.reasons = {};
+          r.reasons[date] = "Dipilih via tautan instan";
+
+          recordUpdated = true;
+          break;
+        }
+      }
+
+      if (!recordUpdated) {
+        records.push({
+          workerId,
+          attendance: { [date]: false },
+          customStatus: { [date]: status },
+          reasons: { [date]: "Dipilih via tautan instan" },
+          dailyAllowance: 25000
+        });
+      }
+
+      if (!state.attendanceLogs) {
+        state.attendanceLogs = [];
+      }
+      state.attendanceLogs.unshift({
+        id: "LOG-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
+        workerId,
+        workerName,
+        date,
+        time: timeStr,
+        latitude: latitude || 0,
+        longitude: longitude || 0,
+        distance: 0,
+        address: `Absen status ${status} via tautan instan`,
+        status: "BERHASIL"
+      });
+      if (state.attendanceLogs.length > 500) {
+        state.attendanceLogs = state.attendanceLogs.slice(0, 500);
+      }
+
+      writeState({
+        ...state,
+        attendanceRecords: records
+      });
+
+      return res.json({
+        success: true,
+        message: `Status absensi Anda hari ini tanggal *${date}* telah dicatat sebagai *${status}* di sistem admin.`
+      });
+    }
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || "Gagal memproses instant check-in" });
   }
 });
 
@@ -1066,7 +1293,41 @@ app.get("/api/wa/status", (req, res) => {
   if (!validateAdminToken(req)) {
     return res.status(401).json({ success: false, error: "Unauthorized: Admin login required" });
   }
-  res.json(getWhatsAppStatus());
+  const status = getWhatsAppStatus();
+  
+  // Calculate late reminder pending status
+  const state = readState();
+  const todayYMD = getJakartaDateStr();
+  
+  // Get current Jakarta hour/minute
+  const jktTimeString = new Date().toLocaleTimeString("en-US", { timeZone: "Asia/Jakarta", hour12: false });
+  const [currentHour, currentMinute] = jktTimeString.split(":").map(Number);
+  
+  // Parse scheduled hour/minute
+  const scheduledTime = state.autoReminderHour || "09:00";
+  const [targetHour, targetMinute] = scheduledTime.split(":").map(Number);
+
+  const isTimeTrigger = currentHour > targetHour || (currentHour === targetHour && currentMinute >= targetMinute);
+  const alreadySentToday = state.lastCronSentDate === todayYMD;
+
+  // Find workers who haven't checked in yet today
+  const workers = state.workers || [];
+  const records = state.attendanceRecords || [];
+  const activeWorkers = workers.filter((w: any) => w.isActive);
+  const absentWorkers = activeWorkers.filter((worker: any) => {
+    const record = records.find((r: any) => r.workerId === worker.id);
+    return !record || !record.attendance || !record.attendance[todayYMD];
+  });
+
+  // Today must be a workday and not a national holiday to trigger standard flow, 
+  // but we can let them know about pending reminders if today is active
+  res.json({
+    ...status,
+    lateReminderPending: status.status === "connected" && isTimeTrigger && !alreadySentToday && absentWorkers.length > 0,
+    absentWorkersCount: absentWorkers.length,
+    absentWorkersNames: absentWorkers.map(w => w.name),
+    todayDate: todayYMD
+  });
 });
 
 // POST Disconnect WhatsApp connection
@@ -1305,7 +1566,6 @@ app.get("/api/cron-reminder", async (req, res) => {
     const errors: string[] = [];
     
     const hostOrigin = req.protocol + "://" + req.get("host");
-    const currentPin = state.attendancePin || "1234";
 
     for (const worker of absentWorkers) {
       if (!worker.phoneNumber) {
@@ -1313,10 +1573,11 @@ app.get("/api/cron-reminder", async (req, res) => {
         continue;
       }
 
-      // Generate pre-filled PIN login URL!
-      const loginUrl = `${hostOrigin}/?id=${worker.id}&pin=${currentPin}`;
+      // Generate instant check-in URL with quick=true
+      const loginUrl = `${hostOrigin}/?id=${worker.id}&quick=true`;
       
-      const message = `Halo *${worker.name}*, silakan klik link berikut untuk melakukan absen mandiri uang makan PT. Nusantara Mineral Sukses Abadi hari ini:\n${loginUrl}\n\nYuk, langsung diklik link-nya ya! Pastikan untuk mengaktifkan dan menyetujui izin lokasi (GPS) di HP Anda, kemudian langsung tekan tombol check-in di dalam aplikasi.\n\nSetelah berhasil, Anda akan menerima pesan pop-up konfirmasi sukses. Selamat bekerja hari ini, dan besok jangan lupa untuk absen kembali ya agar uang makannya selalu lancar! Semangat terus dan jaga keselamatan kerja! 😊✨`;
+      // Select a random anti-spam message template
+      const message = getRandomReminderMessage(worker.name, loginUrl);
 
       const result = await sendWhatsAppMessage(worker.phoneNumber, message);
       if (result.success) {
@@ -1326,12 +1587,13 @@ app.get("/api/cron-reminder", async (req, res) => {
         if (result.error) errors.push(result.error);
       }
 
-      // Interval delay of exactly 5 seconds between each worker message to prevent WhatsApp session logout / spam flags
-      await new Promise(r => setTimeout(r, 5000));
+      // Interval delay of randomized 7 to 10 seconds between each worker message to prevent WhatsApp session logout / spam flags
+      const randomDelay = Math.floor(Math.random() * (10000 - 7000 + 1)) + 7000;
+      await new Promise(r => setTimeout(r, randomDelay));
     }
 
     state.lastCronStatus = `Berhasil mengirim pengingat ke ${sentCount} karyawan.${failedCount > 0 ? ` Gagal: ${failedCount} karyawan.` : ""}`;
-    if (!force) {
+    if (!force || req.query.markSent === "true") {
       state.lastCronSentDate = todayYMD;
     }
     writeState(state);
@@ -1446,7 +1708,6 @@ async function startServer() {
         }
 
         const hostOrigin = state.lastHostOrigin || "https://ais-pre-e7m6l6ql7mfgk6e4xkr56y-958431568317.asia-east1.run.app";
-        const currentPin = state.attendancePin || "1234";
 
         let sentCount = 0;
         let failedCount = 0;
@@ -1457,8 +1718,11 @@ async function startServer() {
             continue;
           }
 
-          const loginUrl = `${hostOrigin}/?id=${worker.id}&pin=${currentPin}`;
-          const message = `Halo *${worker.name}*, silakan klik link berikut untuk melakukan absen mandiri uang makan PT. Nusantara Mineral Sukses Abadi hari ini:\n${loginUrl}\n\nYuk, langsung diklik link-nya ya! Pastikan untuk mengaktifkan dan menyetujui izin lokasi (GPS) di HP Anda, kemudian langsung tekan tombol check-in di dalam aplikasi.\n\nSetelah berhasil, Anda akan menerima pesan pop-up konfirmasi sukses. Selamat bekerja hari ini, dan besok jangan lupa untuk absen kembali ya agar uang makannya selalu lancar! Semangat terus dan jaga keselamatan kerja! 😊✨`;
+          // Generate instant check-in URL with quick=true
+          const loginUrl = `${hostOrigin}/?id=${worker.id}&quick=true`;
+          
+          // Select a random anti-spam message template
+          const message = getRandomReminderMessage(worker.name, loginUrl);
 
           const result = await sendWhatsAppMessage(worker.phoneNumber, message);
           if (result.success) {
@@ -1467,8 +1731,9 @@ async function startServer() {
             failedCount++;
           }
 
-          // 5-second interval delay between each worker message
-          await new Promise(r => setTimeout(r, 5000));
+          // Interval delay of randomized 7 to 10 seconds between each worker message to prevent WhatsApp session logout / spam flags
+          const randomDelay = Math.floor(Math.random() * (10000 - 7000 + 1)) + 7000;
+          await new Promise(r => setTimeout(r, randomDelay));
         }
 
         const nowStr = new Date().toLocaleTimeString("id-ID", { timeZone: "Asia/Jakarta" });

@@ -108,6 +108,300 @@ export async function initWhatsApp() {
     // Handle credential updates
     sock.ev.on("creds.update", saveCreds);
 
+    // Handle incoming message replies from workers
+    sock.ev.on("messages.upsert", async (m: any) => {
+      try {
+        if (m.type !== "notify") return;
+        
+        for (const msg of m.messages) {
+          // Ignore self messages
+          if (msg.key.fromMe) continue;
+          
+          const senderJid = msg.key.remoteJid;
+          if (!senderJid || !senderJid.endsWith("@s.whatsapp.net")) continue;
+          
+          const senderPhone = senderJid.split("@")[0]; // e.g. "628123456789"
+          
+          // Load data-store to find if sender is a registered worker
+          const DATA_FILE = path.join(process.cwd(), "data-store.json");
+          if (!fs.existsSync(DATA_FILE)) continue;
+          
+          let state;
+          try {
+            const stateRaw = fs.readFileSync(DATA_FILE, "utf-8");
+            state = JSON.parse(stateRaw);
+          } catch (e) {
+            console.error("Error reading data-store.json inside messages.upsert handler:", e);
+            continue;
+          }
+          
+          const workers = state.workers || [];
+          
+          // Normalize phone function
+          const normalizePhone = (p: string) => p.replace(/[^0-9]/g, "");
+          const cleanSenderPhone = normalizePhone(senderPhone);
+          
+          const worker = workers.find((w: any) => {
+            if (!w.phoneNumber) return false;
+            let wp = normalizePhone(w.phoneNumber);
+            if (wp.startsWith("0")) wp = "62" + wp.slice(1);
+            if (wp.startsWith("8")) wp = "62" + wp;
+            return wp === cleanSenderPhone && w.isActive;
+          });
+          
+          if (!worker) {
+            continue;
+          }
+          
+          // Get current date in Jakarta timezone (YYYY-MM-DD)
+          const getJakartaDate = () => {
+            const d = new Date();
+            const formatter = new Intl.DateTimeFormat("id-ID", {
+              timeZone: "Asia/Jakarta",
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+            });
+            const parts = formatter.formatToParts(d);
+            const day = parts.find(p => p.type === "day")?.value || "01";
+            const month = parts.find(p => p.type === "month")?.value || "01";
+            const year = parts.find(p => p.type === "year")?.value || "2026";
+            return `${year}-${month}-${day}`;
+          };
+          
+          const todayDate = getJakartaDate();
+          const workerName = worker.name;
+          const workerId = worker.id;
+
+          // Check if worker already completed attendance today
+          const records = state.attendanceRecords || [];
+          const matchedRecord = records.find((r: any) => r.workerId === workerId);
+          const hasAttendanceToday = matchedRecord && matchedRecord.attendance && matchedRecord.attendance[todayDate] !== undefined;
+          const currentStatusToday = matchedRecord && matchedRecord.customStatus && matchedRecord.customStatus[todayDate];
+          const isCheckedInToday = hasAttendanceToday && (matchedRecord.attendance[todayDate] === true || !!currentStatusToday);
+          
+          // Extract text and location
+          const messageText = (
+            msg.message?.conversation || 
+            msg.message?.extendedTextMessage?.text || 
+            ""
+          ).trim();
+          
+          const isLocation = !!msg.message?.locationMessage;
+          
+          if (isLocation) {
+            const location = msg.message.locationMessage;
+            const lat = location.degreesLatitude;
+            const lon = location.degreesLongitude;
+            
+            // Calculate distance to office
+            const OFFICE_LAT = -6.244342;
+            const OFFICE_LON = 106.843073;
+            const MAX_DISTANCE_METERS = 150;
+            
+            const R = 6371e3; // metres
+            const phi1 = (lat * Math.PI) / 180;
+            const phi2 = (OFFICE_LAT * Math.PI) / 180;
+            const deltaPhi = ((OFFICE_LAT - lat) * Math.PI) / 180;
+            const deltaLambda = ((OFFICE_LON - lon) * Math.PI) / 180;
+            const a =
+              Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2) +
+              Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            const distance = R * c; // in meters
+            
+            if (distance <= MAX_DISTANCE_METERS) {
+              // Within range! Register "Hadir" automatically
+              let recordUpdated = false;
+              for (const r of records) {
+                if (r.workerId === workerId) {
+                  if (!r.attendance) r.attendance = {};
+                  r.attendance[todayDate] = true;
+                  // Clear any previous custom status for today
+                  if (r.customStatus && r.customStatus[todayDate]) {
+                    delete r.customStatus[todayDate];
+                  }
+                  if (r.reasons && r.reasons[todayDate]) {
+                    delete r.reasons[todayDate];
+                  }
+                  recordUpdated = true;
+                  break;
+                }
+              }
+              if (!recordUpdated) {
+                records.push({
+                  workerId,
+                  attendance: { [todayDate]: true },
+                  dailyAllowance: 25000
+                });
+              }
+              
+              // Add to logs
+              const now = new Date();
+              const timeStr = now.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+              if (!state.attendanceLogs) state.attendanceLogs = [];
+              state.attendanceLogs.unshift({
+                id: "LOG-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
+                workerId,
+                workerName,
+                date: todayDate,
+                time: timeStr,
+                latitude: lat,
+                longitude: lon,
+                distance: Math.round(distance),
+                address: `Absen via WhatsApp Bot (Share Location)`,
+                status: "BERHASIL"
+              });
+              if (state.attendanceLogs.length > 500) {
+                state.attendanceLogs = state.attendanceLogs.slice(0, 500);
+              }
+              
+              state.attendanceRecords = records;
+              fs.writeFileSync(DATA_FILE, JSON.stringify(state, null, 2), "utf-8");
+              
+              const responseText = `✅ *Absen Kehadiran Diterima!*
+              
+Halo *${workerName}*, presensi kehadiran (Hadir) Anda hari ini tanggal *${todayDate}* berhasil dicatat secara otomatis karena lokasi Anda berada di jangkauan kantor (jarak: *${Math.round(distance)}* meter dari kantor).
+
+Selamat bekerja! 💼`;
+              await sock.sendMessage(senderJid, { text: responseText });
+            } else {
+              // Outside of range! Warn and offer options
+              const responseText = `⚠️ *Absen Kehadiran Ditolak!*
+
+Halo *${workerName}*, Anda terdeteksi berada di luar jangkauan area kantor (jarak: *${Math.round(distance)}* meter, batas maksimal *150* meter).
+
+Silakan pilih alasan ketidakhadiran Anda hari ini dengan membalas pesan ini menggunakan angka atau kata kunci di bawah:
+1️⃣ *Sakit* (Ketik: *Sakit*)
+2️⃣ *Izin* (Ketik: *Izin*)
+3️⃣ *Cuti* (Ketik: *Cuti*)
+4️⃣ *Meeting* (Ketik: *Meeting*)
+5️⃣ *Absen* (Ketik: *Absen* / Alpa)`;
+              await sock.sendMessage(senderJid, { text: responseText });
+            }
+          } else if (messageText) {
+            const cleanMsg = messageText.toLowerCase().trim();
+            const isMenuKeyword = cleanMsg === "menu" || cleanMsg === "bantuan" || cleanMsg === "help";
+            
+            // Extract selected status first to see if they are trying to set/change a status
+            let selectedStatus: string | null = null;
+            if (cleanMsg === "1" || cleanMsg === "sakit" || (cleanMsg.includes("sakit") && cleanMsg.length < 15)) {
+              selectedStatus = "Sakit";
+            } else if (cleanMsg === "2" || cleanMsg === "izin" || (cleanMsg.includes("izin") && cleanMsg.length < 15)) {
+              selectedStatus = "Izin";
+            } else if (cleanMsg === "3" || cleanMsg === "cuti" || (cleanMsg.includes("cuti") && cleanMsg.length < 15)) {
+              selectedStatus = "Cuti";
+            } else if (cleanMsg === "4" || cleanMsg === "meeting" || (cleanMsg.includes("meeting") && cleanMsg.length < 15)) {
+              selectedStatus = "Meeting";
+            } else if (cleanMsg === "5" || cleanMsg === "absen" || cleanMsg === "alpa" || (cleanMsg.includes("absen") && cleanMsg.length < 15)) {
+              selectedStatus = "Absen";
+            }
+
+            const isPresentToday = matchedRecord && matchedRecord.attendance && matchedRecord.attendance[todayDate] === true;
+            
+            // If they are already checked in as "Hadir" (Present) today, completely ignore normal texts
+            // so they can chat with the admin/staff about work things normally.
+            if (isPresentToday && !isMenuKeyword) {
+              continue;
+            }
+
+            // If they already have a custom status set (like Sakit/Izin), we ignore normal chats.
+            // But if they sent an explicit, strict option or status keyword, we let them overwrite/correct it!
+            if (isCheckedInToday && !selectedStatus && !isMenuKeyword) {
+              // Silent skip, let admin and worker chat about work naturally
+              continue;
+            }
+            
+            if (selectedStatus) {
+              let recordUpdated = false;
+              for (const r of records) {
+                if (r.workerId === workerId) {
+                  if (!r.attendance) r.attendance = {};
+                  r.attendance[todayDate] = false; // Not present
+                  
+                  if (!r.customStatus) r.customStatus = {};
+                  r.customStatus[todayDate] = selectedStatus;
+                  
+                  if (!r.reasons) r.reasons = {};
+                  r.reasons[todayDate] = `Dipilih via WhatsApp Bot`;
+                  
+                  recordUpdated = true;
+                  break;
+                }
+              }
+              if (!recordUpdated) {
+                records.push({
+                  workerId,
+                  attendance: { [todayDate]: false },
+                  customStatus: { [todayDate]: selectedStatus },
+                  reasons: { [todayDate]: `Dipilih via WhatsApp Bot` },
+                  dailyAllowance: 25000
+                });
+              }
+              
+              // Add log
+              const now = new Date();
+              const timeStr = now.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+              if (!state.attendanceLogs) state.attendanceLogs = [];
+              state.attendanceLogs.unshift({
+                id: "LOG-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
+                workerId,
+                workerName,
+                date: todayDate,
+                time: timeStr,
+                latitude: 0,
+                longitude: 0,
+                distance: 0,
+                address: `Absen status ${selectedStatus} via WhatsApp Bot`,
+                status: "BERHASIL"
+              });
+              if (state.attendanceLogs.length > 500) {
+                state.attendanceLogs = state.attendanceLogs.slice(0, 500);
+              }
+              
+              state.attendanceRecords = records;
+              fs.writeFileSync(DATA_FILE, JSON.stringify(state, null, 2), "utf-8");
+              
+              const responseText = `✅ *Status Absensi Tercatat!*
+
+Halo *${workerName}*, status absensi Anda hari ini tanggal *${todayDate}* telah dicatat sebagai *${selectedStatus}* di sistem admin. 
+
+💡 *Salah pilih / Tidak sengaja?*
+Jika Anda tidak sengaja mengirimkan nomor/status ini, Anda dapat memperbaikinya kapan saja sebelum jam kerja berakhir dengan:
+📍 **Kirimkan lokasi aktif Anda (Share Location)** sekarang untuk mengubah status menjadi *Hadir*, atau ketik angka/status pilihan lainnya jika ingin mengganti status.`;
+              await sock.sendMessage(senderJid, { text: responseText });
+            } else if (
+              cleanMsg === "absen" || 
+              cleanMsg === "hadir" || 
+              cleanMsg === "halo" || 
+              cleanMsg === "pagi" || 
+              cleanMsg === "siang" || 
+              cleanMsg === "ping" || 
+              cleanMsg === "bot" ||
+              isMenuKeyword
+            ) {
+              // Send a help menu
+              const responseText = `Halo *${workerName}*! 👋
+
+Silakan pilih cara melakukan absensi hari ini:
+1️⃣ *Kirimkan Lokasi Aktif Anda (Share Location)* melalui WhatsApp ini untuk absen Hadir langsung di kantor.
+2️⃣ Atau ketik angka/status di bawah jika berhalangan hadir:
+   👉 *Sakit*
+   👉 *Izin*
+   👉 *Cuti*
+   👉 *Meeting*
+   👉 *Absen* (Alpa)
+
+_Catatan: Jika Anda ingin melakukan absensi normal dengan tanda tangan & foto, silakan klik link absensi harian yang dikirim sebelumnya._`;
+              await sock.sendMessage(senderJid, { text: responseText });
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Error processing message upsert inside WA Bot:", err);
+      }
+    });
+
     // Handle connection updates
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;

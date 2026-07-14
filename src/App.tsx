@@ -474,6 +474,12 @@ export default function App() {
   const [waBotUser, setWaBotUser] = useState<{ id: string; name?: string } | null>(null);
   const [waBotError, setWaBotError] = useState<string | null>(null);
   
+  // Late connection reminder states
+  const [showLateReminderConfirm, setShowLateReminderConfirm] = useState<boolean>(false);
+  const [lateReminderCount, setLateReminderCount] = useState<number>(0);
+  const [lateReminderWorkers, setLateReminderWorkers] = useState<string[]>([]);
+  const [isSendingLateReminder, setIsSendingLateReminder] = useState<boolean>(false);
+  
   // Link via phone/pairing code states
   const [waConnectMethod, setWaConnectMethod] = useState<"qr" | "phone">("qr");
   const [waPairingPhone, setWaPairingPhone] = useState<string>("");
@@ -545,6 +551,19 @@ export default function App() {
           setWaBotQr(data.qr);
           setWaBotUser(data.user);
           setWaBotError(data.error);
+
+          // If there is a late reminder pending, show confirmation popup unless dismissed today
+          if (data.lateReminderPending) {
+            const todayYMD = data.todayDate || new Date().toLocaleDateString("en-CA");
+            const dismissed = localStorage.getItem(`wa_late_reminder_dismissed_${todayYMD}`);
+            if (dismissed !== "true") {
+              setLateReminderCount(data.absentWorkersCount || 0);
+              setLateReminderWorkers(data.absentWorkersNames || []);
+              setShowLateReminderConfirm(true);
+            }
+          } else {
+            setShowLateReminderConfirm(false);
+          }
         }
       } catch (err) {
         console.error("Error fetching WhatsApp status:", err);
@@ -866,6 +885,34 @@ export default function App() {
     }
   };
 
+  // Send late connection reminder now
+  const handleSendLateReminderNow = async () => {
+    setIsSendingLateReminder(true);
+    try {
+      const res = await fetch("/api/cron-reminder?force=true&markSent=true");
+      const data = await res.json();
+      if (data.success) {
+        setShowLateReminderConfirm(false);
+        await fetchSharedState(true);
+        alert("Berhasil! Pesan pengingat telah dikirim ke karyawan yang belum absen hari ini.");
+      } else {
+        alert("Gagal mengirim pengingat: " + (data.message || "Terjadi kesalahan"));
+      }
+    } catch (err) {
+      console.error("Error sending late reminder:", err);
+      alert("Terjadi kesalahan jaringan saat mencoba mengirim pengingat.");
+    } finally {
+      setIsSendingLateReminder(false);
+    }
+  };
+
+  // Dismiss late connection reminder prompt for today
+  const handleDismissLateReminder = () => {
+    const todayYMD = new Date().toLocaleDateString("en-CA");
+    localStorage.setItem(`wa_late_reminder_dismissed_${todayYMD}`, "true");
+    setShowLateReminderConfirm(false);
+  };
+
   // Reusable function to load shared state from server
   const fetchSharedState = async (quiet = false) => {
     try {
@@ -1015,6 +1062,76 @@ export default function App() {
       return () => clearInterval(timer);
     }
   }, [selfWorkerId]);
+
+  // --- QUICK ATTENDANCE INJECTED STATES & ACTIONS ---
+  const isQuickMode = urlParams.get("quick") === "true";
+  const [quickSubmitState, setQuickSubmitState] = useState<"idle" | "submitting" | "success" | "error" | "outside">("idle");
+  const [quickSubmitMessage, setQuickSubmitMessage] = useState<string>("");
+  const [selectedQuickStatus, setSelectedQuickStatus] = useState<string>("");
+
+  const triggerQuickCheckIn = async (status: string, overrideCoords?: { latitude: number; longitude: number }) => {
+    if (!selfWorkerId) return;
+    setQuickSubmitState("submitting");
+    setSelectedQuickStatus(status);
+    try {
+      const todayYMD = formatLocalYYYYMMDD(new Date());
+      const activeCoords = overrideCoords || userCoords;
+      const response = await fetch("/api/quick-self-attend", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workerId: selfWorkerId,
+          date: todayYMD,
+          latitude: activeCoords ? activeCoords.latitude : undefined,
+          longitude: activeCoords ? activeCoords.longitude : undefined,
+          status: status
+        })
+      });
+      const data = await response.json();
+      if (response.ok && data.success) {
+        setQuickSubmitState("success");
+        setQuickSubmitMessage(data.message);
+        setSelfIsAttendedToday(true);
+        // Synchronize locally to keep states reactive
+        const updatedRecords = attendanceRecords.map((r) => {
+          if (r.workerId === selfWorkerId) {
+            return {
+              ...r,
+              attendance: {
+                ...r.attendance,
+                [todayYMD]: status === "Hadir",
+              },
+              customStatus: {
+                ...r.customStatus,
+                [todayYMD]: status !== "Hadir" ? status : undefined
+              }
+            };
+          }
+          return r;
+        });
+        setAttendanceRecords(updatedRecords);
+      } else if (response.ok && data.reason === "OUTSIDE") {
+        setQuickSubmitState("outside");
+      } else {
+        setQuickSubmitState("error");
+        setQuickSubmitMessage(data.error || "Gagal memproses absensi otomatis.");
+      }
+    } catch (err: any) {
+      setQuickSubmitState("error");
+      setQuickSubmitMessage(err.message || "Gagal menghubungi server.");
+    }
+  };
+
+  useEffect(() => {
+    if (selfWorkerId && isQuickMode && geoStatus === "available" && geoDistance !== null && quickSubmitState === "idle") {
+      const isNear = geoDistance <= MAX_DISTANCE_METERS;
+      if (isNear) {
+        triggerQuickCheckIn("Hadir");
+      } else {
+        setQuickSubmitState("outside");
+      }
+    }
+  }, [selfWorkerId, isQuickMode, geoStatus, geoDistance, quickSubmitState, userCoords]);
 
   // Geolocation Constants & Calculations
   const OFFICE_LAT = -6.244342;
@@ -2217,6 +2334,305 @@ export default function App() {
   // --- CONDITIONAL RENDER: WORKER SELF-ATTENDANCE ---
   if (selfWorkerId) {
     const todayStr = getIndonesianDateStr(new Date());
+
+    if (isQuickMode) {
+      const handleCloseWindow = () => {
+        try {
+          window.close();
+        } catch (e) {
+          console.error(e);
+        }
+        alert("Silakan tutup halaman ini untuk kembali ke WhatsApp.");
+      };
+
+      return (
+        <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between selection:bg-indigo-500 selection:text-white font-sans p-4 relative overflow-hidden">
+          {/* Decorative ambient gradients */}
+          <div className="absolute top-[-10%] left-1/2 -translate-x-1/2 w-[500px] h-[500px] bg-indigo-600/10 rounded-full blur-[120px] pointer-events-none"></div>
+          <div className="absolute bottom-[-10%] left-1/4 w-[400px] h-[400px] bg-emerald-500/10 rounded-full blur-[100px] pointer-events-none"></div>
+
+          {/* Elegant header */}
+          <header className="max-w-md w-full mx-auto pt-6 flex items-center justify-between border-b border-slate-800 pb-4 z-10">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-white rounded-xl shadow-md overflow-hidden flex items-center justify-center p-0.5 border border-slate-800">
+                <img
+                  src="https://i.ibb.co.com/FqDNnD8W/Logo-Nusantara-Mineral-Abadi.webp"
+                  alt="Logo PT. Nusantara Mineral Sukses Abadi"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-cover rounded-lg"
+                />
+              </div>
+              <div className="text-left">
+                <span className="font-extrabold text-[11px] tracking-tight font-display text-white block uppercase">PT. Nusantara Mineral</span>
+                <span className="block text-[9px] text-indigo-400 font-bold font-mono">ABSENSI CEPAT WHATSAPP</span>
+              </div>
+            </div>
+            <div className="text-right">
+              <span className="text-[10px] bg-slate-900 text-emerald-400 border border-emerald-500/20 px-2.5 py-0.5 rounded-full font-bold font-mono flex items-center gap-1">
+                <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse"></span>
+                Sistem Instan
+              </span>
+            </div>
+          </header>
+
+          <main className="max-w-md w-full mx-auto my-auto py-10 z-10 flex flex-col items-center justify-center">
+            {/* INITIAL DETECTING LOKASI STATE */}
+            {(quickSubmitState === "idle" || quickSubmitState === "submitting") && geoStatus === "requesting" && (
+              <motion.div
+                initial={{ opacity: 0, y: 15 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="w-full space-y-6 text-center"
+              >
+                <div className="relative w-24 h-24 mx-auto flex items-center justify-center">
+                  <div className="absolute inset-0 border-4 border-indigo-500/10 rounded-full"></div>
+                  <div className="absolute inset-0 border-4 border-transparent border-t-indigo-500 rounded-full animate-spin"></div>
+                  <MapPin className="w-8 h-8 text-indigo-400 animate-pulse" />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-lg font-bold text-white tracking-tight">Memverifikasi Lokasi Kerja...</h3>
+                  <p className="text-xs text-slate-400 max-w-xs mx-auto leading-relaxed">
+                    Mohon tunggu beberapa detik, sistem sedang mendeteksi koordinat GPS Anda secara aman untuk mencatatkan kehadiran harian Anda.
+                  </p>
+                </div>
+                {selfWorker && (
+                  <div className="bg-slate-900/60 border border-slate-800 p-3.5 rounded-2xl max-w-xs mx-auto flex items-center gap-3">
+                    <div className="w-8 h-8 bg-indigo-500/20 text-indigo-300 rounded-full flex items-center justify-center font-bold text-xs uppercase font-mono">
+                      {selfWorker.name.charAt(0)}
+                    </div>
+                    <div className="text-left">
+                      <span className="block text-[10px] text-slate-500 font-bold uppercase font-mono">Pekerja Lapangan</span>
+                      <span className="block text-xs font-bold text-white leading-tight">{selfWorker.name}</span>
+                    </div>
+                  </div>
+                )}
+              </motion.div>
+            )}
+
+            {/* PROCESSING SUBMITTING STATE */}
+            {quickSubmitState === "submitting" && geoStatus === "available" && (
+              <motion.div
+                initial={{ opacity: 0, y: 15 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="w-full space-y-6 text-center"
+              >
+                <div className="relative w-24 h-24 mx-auto flex items-center justify-center">
+                  <div className="absolute inset-0 border-4 border-indigo-500/10 rounded-full"></div>
+                  <div className="absolute inset-0 border-4 border-transparent border-t-emerald-500 rounded-full animate-spin"></div>
+                  <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin" />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-lg font-bold text-white tracking-tight">Mencatatkan Kehadiran...</h3>
+                  <p className="text-xs text-slate-400 max-w-xs mx-auto leading-relaxed">
+                    Mengirimkan data koordinat GPS Anda ke database PT. Nusantara Mineral Sukses Abadi.
+                  </p>
+                </div>
+              </motion.div>
+            )}
+
+            {/* SUCCESS STATE */}
+            {quickSubmitState === "success" && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="w-full bg-slate-900/60 border border-slate-800/80 rounded-3xl p-6 shadow-2xl text-center space-y-6 max-w-sm mx-auto"
+              >
+                <div className="w-16 h-16 bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 rounded-full flex items-center justify-center mx-auto shadow-lg shadow-emerald-500/10">
+                  <CheckCircle className="w-10 h-10 animate-bounce" />
+                </div>
+                <div className="space-y-2">
+                  <span className="text-[9px] bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-extrabold uppercase font-mono px-3 py-1 rounded-full tracking-wider">
+                    ABSEN BERHASIL
+                  </span>
+                  <h3 className="text-xl font-extrabold text-white font-display tracking-tight pt-2">Presensi Diterima</h3>
+                  <p className="text-xs text-slate-300 leading-relaxed pt-1">
+                    {quickSubmitMessage || `Halo, presensi kehadiran Anda hari ini berhasil dicatat secara otomatis karena lokasi Anda berada di jangkauan kantor. Selamat bekerja!`}
+                  </p>
+                </div>
+
+                {selfWorker && (
+                  <div className="border-t border-b border-slate-800 py-3.5 space-y-2 text-left">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-slate-500 font-bold">Karyawan:</span>
+                      <span className="text-white font-bold">{selfWorker.name}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-slate-500 font-bold">Hari/Tanggal:</span>
+                      <span className="text-slate-300 font-medium">{todayStr}</span>
+                    </div>
+                    {geoDistance !== null && (
+                      <div className="flex justify-between text-xs">
+                        <span className="text-slate-500 font-bold">Jarak Verifikasi:</span>
+                        <span className="text-emerald-400 font-mono font-bold">~{Math.round(geoDistance)} meter (Aman ✅)</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  <button
+                    onClick={handleCloseWindow}
+                    className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold py-3.5 px-6 rounded-xl transition duration-150 flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-emerald-600/20 uppercase text-xs tracking-wider font-display"
+                  >
+                    <CheckCircle className="w-4 h-4" />
+                    <span>OK, Kembali ke WhatsApp</span>
+                  </button>
+                  <p className="text-[10px] text-slate-500 leading-normal">
+                    Halaman ini aman untuk ditutup. Jika halaman tidak menutup otomatis, silakan tekan tombol kembali atau tutup tab browser Anda.
+                  </p>
+                </div>
+              </motion.div>
+            )}
+
+            {/* OUTSIDE OFFICE RANGE STATE (Shows Choices) */}
+            {quickSubmitState === "outside" && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="w-full bg-slate-900/60 border border-slate-800/80 rounded-3xl p-6 shadow-2xl space-y-6 max-w-md mx-auto text-center"
+              >
+                <div className="w-14 h-14 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-full flex items-center justify-center mx-auto shadow-inner">
+                  <AlertTriangle className="w-7 h-7" />
+                </div>
+                <div className="space-y-2">
+                  <span className="text-[9px] bg-rose-500/10 border border-rose-500/20 text-rose-400 font-extrabold uppercase font-mono px-3 py-1 rounded-full tracking-wider">
+                    DI LUAR JANGKAUAN KANTOR
+                  </span>
+                  <h3 className="text-lg font-extrabold text-white font-display tracking-tight pt-2">Absen Tidak Dapat Diterima</h3>
+                  <p className="text-xs text-slate-300 leading-relaxed max-w-sm mx-auto">
+                    Deteksi GPS menunjukkan jarak Anda berjarak <strong className="text-rose-400">{geoDistance !== null ? Math.round(geoDistance) : "---"} meter</strong> dari kantor (Maks. 150m). Silakan pilih salah satu status absensi resmi di bawah ini:
+                  </p>
+                </div>
+
+                {/* Grid of 5 beautiful custom status cards */}
+                <div className="grid grid-cols-2 gap-2.5 text-left">
+                  {[
+                    { status: "Sakit", label: "Sakit (Medical)", icon: FileText, desc: "Tidak enak badan / istirahat", color: "hover:border-rose-500/50 hover:bg-rose-500/5 text-rose-400 border-slate-800 bg-slate-900/40" },
+                    { status: "Izin", label: "Izin Resmi", icon: CheckSquare, desc: "Keperluan keluarga mendesak", color: "hover:border-indigo-500/50 hover:bg-indigo-500/5 text-indigo-400 border-slate-800 bg-slate-900/40" },
+                    { status: "Cuti", label: "Cuti Tahunan", icon: Calendar, desc: "Hak cuti harian karyawan", color: "hover:border-violet-500/50 hover:bg-violet-500/5 text-violet-400 border-slate-800 bg-slate-900/40" },
+                    { status: "Meeting", label: "Dinas / Meeting", icon: Users, desc: "Keperluan luar kantor", color: "hover:border-emerald-500/50 hover:bg-emerald-500/5 text-emerald-400 border-slate-800 bg-slate-900/40" },
+                  ].map((opt) => (
+                    <button
+                      key={opt.status}
+                      onClick={() => triggerQuickCheckIn(opt.status)}
+                      className={`p-3 rounded-2xl border transition duration-150 cursor-pointer flex flex-col justify-between h-[100px] text-left relative overflow-hidden group ${opt.color}`}
+                    >
+                      <div className="flex justify-between items-start w-full">
+                        <span className="font-extrabold text-xs tracking-tight text-white group-hover:text-indigo-200">{opt.label}</span>
+                        <opt.icon className="w-4 h-4 shrink-0 opacity-80" />
+                      </div>
+                      <span className="text-[10px] text-slate-400 leading-tight font-medium">{opt.desc}</span>
+                    </button>
+                  ))}
+                  {/* Absen (Alpa) spans full width */}
+                  <button
+                    onClick={() => triggerQuickCheckIn("Absen")}
+                    className="col-span-2 p-3.5 rounded-2xl border border-slate-800 bg-slate-900/40 hover:border-slate-500/50 hover:bg-slate-500/5 transition duration-150 cursor-pointer flex items-center justify-between text-slate-400 group"
+                  >
+                    <div className="flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-slate-400 shrink-0" />
+                      <div className="text-left">
+                        <span className="font-extrabold text-xs text-white group-hover:text-slate-200">Absen (Tanpa Keterangan)</span>
+                        <span className="block text-[9px] text-slate-500">Mencatatkan alpa hari ini</span>
+                      </div>
+                    </div>
+                    <ArrowRight className="w-4 h-4 text-slate-500 group-hover:translate-x-1 transition-transform" />
+                  </button>
+                </div>
+
+                <div className="border-t border-slate-800 pt-4 flex flex-col gap-2">
+                  <p className="text-[10px] text-slate-500">
+                    Salah membaca koordinat GPS? Pastikan Anda berada di luar ruangan atau ketuk tombol di bawah:
+                  </p>
+                  <button
+                    onClick={() => {
+                      const officeCoords = { latitude: OFFICE_LAT, longitude: OFFICE_LON };
+                      setUserCoords(officeCoords);
+                      setGeoDistance(0);
+                      setGeoStatus("available");
+                      triggerQuickCheckIn("Hadir", officeCoords);
+                    }}
+                    className="text-[11px] font-bold text-indigo-400 hover:text-indigo-300 transition underline cursor-pointer font-sans"
+                  >
+                    Gunakan Koordinat Kantor Default (Bypass GPS)
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
+            {/* ERROR / EXCEPTION / GPS DENIED STATE */}
+            {(geoStatus === "denied" || geoStatus === "error" || quickSubmitState === "error") && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="w-full bg-slate-900/60 border border-slate-800/80 rounded-3xl p-6 shadow-2xl space-y-6 max-w-md mx-auto text-center"
+              >
+                <div className="w-14 h-14 bg-rose-500/15 border border-rose-500/20 text-rose-400 rounded-full flex items-center justify-center mx-auto shadow-inner">
+                  <AlertCircle className="w-7 h-7 animate-pulse" />
+                </div>
+                <div className="space-y-2">
+                  <span className="text-[9px] bg-rose-500/10 border border-rose-500/20 text-rose-400 font-extrabold uppercase font-mono px-3 py-1 rounded-full tracking-wider">
+                    KENDALA PRESENSI
+                  </span>
+                  <h3 className="text-lg font-extrabold text-white font-display tracking-tight pt-2">Gagal Melakukan Deteksi GPS</h3>
+                  <p className="text-xs text-rose-300 leading-relaxed max-w-sm mx-auto">
+                    {geoStatus === "denied" || geoStatus === "error" ? geoErrorMsg : quickSubmitMessage}
+                  </p>
+                </div>
+
+                <div className="space-y-3 pt-2">
+                  <button
+                    onClick={requestGeolocation}
+                    className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold py-3 rounded-xl transition duration-150 flex items-center justify-center gap-2 cursor-pointer text-xs uppercase tracking-wider font-display"
+                  >
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Coba Lagi Akses GPS</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      const officeCoords = { latitude: OFFICE_LAT, longitude: OFFICE_LON };
+                      setUserCoords(officeCoords);
+                      setGeoDistance(0);
+                      setGeoStatus("available");
+                      triggerQuickCheckIn("Hadir", officeCoords);
+                    }}
+                    className="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold py-3 rounded-xl transition duration-150 flex items-center justify-center gap-2 cursor-pointer text-xs uppercase tracking-wider font-display"
+                  >
+                    <MapPin className="w-4 h-4" />
+                    <span>Bypass GPS (Titik Kantor Default)</span>
+                  </button>
+                </div>
+
+                <div className="border-t border-slate-800 pt-5 space-y-3">
+                  <p className="text-[11px] text-slate-400 font-medium">
+                    Atau, jika Anda tidak berada di kantor hari ini, silakan langsung laporkan status absensi Anda:
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { status: "Sakit", label: "Sakit" },
+                      { status: "Izin", label: "Izin" },
+                      { status: "Cuti", label: "Cuti" },
+                      { status: "Meeting", label: "Meeting" },
+                    ].map((opt) => (
+                      <button
+                        key={opt.status}
+                        onClick={() => triggerQuickCheckIn(opt.status)}
+                        className="py-2.5 rounded-xl border border-slate-800 bg-slate-950 hover:bg-slate-900 transition text-xs font-bold text-slate-300 cursor-pointer"
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </main>
+
+          <footer className="max-w-md w-full mx-auto border-t border-slate-900 pt-4 pb-6 text-center text-[10px] text-slate-600 z-10 font-mono">
+            PT. Nusantara Mineral Sukses Abadi © 2026. Aplikasi Rekap Presensi Aman & Terverifikasi GPS.
+          </footer>
+        </div>
+      );
+    }
 
     return (
       <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col justify-between selection:bg-indigo-500 selection:text-white font-sans p-4 relative overflow-hidden">
@@ -4774,6 +5190,42 @@ export default function App() {
                                        </button>
                                      </td>
                                    );
+                                 } else if (cStatus === "Cuti") {
+                                   return (
+                                     <td key={dateStr} className="py-4 px-3 text-center">
+                                       <button
+                                         onClick={() => setManageStatusModal({
+                                           workerId: worker.id,
+                                           workerName: worker.name,
+                                           date: dateStr,
+                                           status: "Cuti",
+                                           reason: reasonText || ""
+                                         })}
+                                         className="w-8 h-8 rounded-xl bg-purple-500 text-white font-extrabold flex items-center justify-center transition cursor-pointer mx-auto shadow-sm hover:scale-105 hover:bg-purple-400"
+                                         title="Cuti (Klik untuk melihat detail)"
+                                       >
+                                        C
+                                       </button>
+                                     </td>
+                                   );
+                                 } else if (cStatus === "Absen" || cStatus === "Alpa") {
+                                   return (
+                                     <td key={dateStr} className="py-4 px-3 text-center">
+                                       <button
+                                         onClick={() => setManageStatusModal({
+                                           workerId: worker.id,
+                                           workerName: worker.name,
+                                           date: dateStr,
+                                           status: "Absen",
+                                           reason: reasonText || ""
+                                         })}
+                                         className="w-8 h-8 rounded-xl bg-rose-500 text-white font-extrabold flex items-center justify-center transition cursor-pointer mx-auto shadow-sm hover:scale-105 hover:bg-rose-400"
+                                         title="Absen / Alpa (Klik untuk melihat detail)"
+                                       >
+                                        A
+                                       </button>
+                                     </td>
+                                   );
                                  } else {
                                    // Meeting
                                    return (
@@ -6780,6 +7232,25 @@ export default function App() {
                               if (r.workerId === manageStatusModal.workerId && r.attendance[weekStart] !== undefined) {
                                 const newCustomStatus = { ...(r.customStatus || {}) };
                                 const newReasons = { ...(r.reasons || {}) };
+                                newCustomStatus[manageStatusModal.date] = "Cuti";
+                                newReasons[manageStatusModal.date] = "Diatur oleh admin";
+                                return { ...r, attendance: { ...r.attendance, [manageStatusModal.date]: false }, customStatus: newCustomStatus, reasons: newReasons };
+                              }
+                              return r;
+                            });
+                            setAttendanceRecords(updated);
+                            setManageStatusModal(null);
+                          }}
+                          className="w-full bg-purple-500 hover:bg-purple-600 text-white text-xs font-bold py-2 rounded-xl transition cursor-pointer"
+                        >
+                          Cuti
+                        </button>
+                        <button
+                          onClick={() => {
+                            const updated = attendanceRecords.map((r) => {
+                              if (r.workerId === manageStatusModal.workerId && r.attendance[weekStart] !== undefined) {
+                                const newCustomStatus = { ...(r.customStatus || {}) };
+                                const newReasons = { ...(r.reasons || {}) };
                                 newCustomStatus[manageStatusModal.date] = "Meeting";
                                 newReasons[manageStatusModal.date] = "Diatur oleh admin";
                                 return { ...r, attendance: { ...r.attendance, [manageStatusModal.date]: false }, customStatus: newCustomStatus, reasons: newReasons };
@@ -6795,6 +7266,84 @@ export default function App() {
                         </button>
                      </div>
                   </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* LATE REMINDER CONFIRMATION MODAL */}
+        <AnimatePresence>
+          {showLateReminderConfirm && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-white rounded-2xl max-w-md w-full shadow-xl border border-slate-200 overflow-hidden"
+              >
+                <div className="bg-amber-50 px-6 py-5 border-b border-amber-100 flex items-start gap-4">
+                  <div className="p-2 bg-amber-100 rounded-xl text-amber-600 shrink-0">
+                    <AlertTriangle className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-900 font-display text-base">Pengingat Belum Terkirim</h3>
+                    <p className="text-xs text-amber-800 mt-1 font-sans">
+                      Jam trigger pengingat otomatis telah lewat, namun WhatsApp baru terhubung sekarang.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="p-6 space-y-4">
+                  <p className="text-sm text-slate-600 leading-relaxed">
+                    Sistem mendeteksi bahwa pesan pengingat harian hari ini <strong>belum dikirimkan</strong> karena WhatsApp tidak aktif atau belum terhubung saat jam target.
+                  </p>
+                  
+                  {lateReminderCount > 0 && (
+                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                      <span className="text-xs font-semibold text-slate-500 block mb-2 uppercase tracking-wider">
+                        Ada {lateReminderCount} karyawan belum absen:
+                      </span>
+                      <ul className="text-xs text-slate-700 space-y-1.5 max-h-32 overflow-y-auto">
+                        {lateReminderWorkers.map((name, idx) => (
+                          <li key={idx} className="flex items-center gap-1.5 font-medium">
+                            <span className="w-1.5 h-1.5 bg-rose-500 rounded-full" />
+                            {name}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <p className="text-xs text-slate-500 italic">
+                    Apakah Anda ingin mengirimkan pesan pengingat WhatsApp sekarang kepada karyawan di atas?
+                  </p>
+                </div>
+
+                <div className="bg-slate-50 px-6 py-4 border-t border-slate-100 flex items-center justify-end gap-3">
+                  <button
+                    onClick={handleDismissLateReminder}
+                    className="px-4 py-2 text-sm font-medium text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                  >
+                    Abaikan Hari Ini
+                  </button>
+                  <button
+                    disabled={isSendingLateReminder}
+                    onClick={handleSendLateReminderNow}
+                    className="px-5 py-2 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 rounded-xl transition shadow-sm cursor-pointer flex items-center gap-1.5"
+                  >
+                    {isSendingLateReminder ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Mengirim...
+                      </>
+                    ) : (
+                      <>
+                        <MessageSquare className="w-4 h-4" />
+                        Kirim Sekarang
+                      </>
+                    )}
+                  </button>
                 </div>
               </motion.div>
             </div>
