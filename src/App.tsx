@@ -121,6 +121,27 @@ function parseYearAndMonthFromPeriod(periodText: string): { targetYear: string; 
   return { targetYear, targetMonth };
 }
 
+const FRONTEND_REMINDER_TEMPLATES = [
+  (name: string, url: string) => `Halo *${name}*! 👋\n\nSudah masuk jam kerja nih. Yuk, sempatkan waktu sebentar untuk klik tautan di bawah ini agar absensi harian Anda langsung tercatat otomatis:\n👉 ${url}\n\nPastikan GPS/lokasi di handphone Anda menyala ya saat membukanya. Terima kasih dan selamat beraktivitas! Semangat terus! ✨💼`,
+  (name: string, url: string) => `Selamat pagi *${name}*! ☀️\n\nSemoga hari ini menyenangkan dan penuh berkah! Untuk kelancaran rekap uang makan harian Anda, silakan lakukan presensi cepat melalui link di bawah:\n👉 ${url}\n\nCukup klik link tersebut, sistem akan memverifikasi lokasi Anda secara instan. Terima kasih atas kerja keras Anda di lapangan! Jaga keselamatan selalu! 🛠️💪`,
+  (name: string, url: string) => `Halo Rekan *${name}*, apa kabar hari ini? 😊\n\nJangan lupa untuk mencatatkan kehadiran Anda hari ini demi kelancaran administrasi harian. Klik link di bawah ini untuk check-in instan tanpa ribet:\n👉 ${url}\n\nSelamat bekerja dan tetap utamakan keselamatan kerja di lokasi! Sukses selalu! 🚀🔥`,
+  (name: string, url: string) => `Semangat pagi *${name}*! 🌟\n\nMari kita mulai hari kerja dengan penuh energi positif! Agar data allowance-meal Anda tercatat dengan rapi, silakan absen dengan mengklik link instan berikut:\n👉 ${url}\n\nHanya butuh beberapa detik saja! Terima kasih banyak atas dedikasinya untuk tim! 💼🤝`,
+  (name: string, url: string) => `Pemberitahuan Presensi Harian - *${name}* 📍\n\nYth. Rekan Karyawan, silakan klik tautan presensi di bawah untuk mencatat kehadiran Anda pada hari kerja ini:\n👉 ${url}\n\nSistem akan memproses titik lokasi Anda dalam hitungan detik. Semoga pekerjaan hari ini berjalan dengan lancar dan aman! Terus berikan yang terbaik! 👍📦`,
+  (name: string, url: string) => `Halo *${name}*! Salam sukses untuk Anda hari ini! 🏆\n\nSebelum memulai aktivitas kerja lebih jauh, mohon kesediaan waktunya untuk melakukan absen harian dengan mengetuk link di bawah ini:\n👉 ${url}\n\nSatu klik untuk mempermudah pencatatan uang makan Anda. Terima kasih, tetap fokus dan selalu jaga keselamatan kerja! 🏁❤️`
+];
+
+function getDeterministicReminderMessage(name: string, workerId: string, url: string): string {
+  // Use today's date so it changes daily but stays identical if triggered multiple times in one day
+  const todayStr = new Date().toLocaleDateString("id-ID", { year: "numeric", month: "numeric", day: "numeric" });
+  const str = workerId + todayStr;
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const idx = Math.abs(hash) % FRONTEND_REMINDER_TEMPLATES.length;
+  return FRONTEND_REMINDER_TEMPLATES[idx](name, url);
+}
+
 // Helper to sort transactions putting "Saldo Awal" at the very top, and then the rest by date ascending
 function sortTransactionsWithSaldoAwalFirst(txs: PettyCashTransaction[]): PettyCashTransaction[] {
   const isSaldoAwal = (t: PettyCashTransaction) => 
@@ -7080,7 +7101,8 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={async () => {
-                                    const customMsg = `Halo *${worker.name}*, silakan klik link berikut untuk melakukan absen mandiri uang makan *PT. Nusantara Mineral Sukses Abadi* hari ini:\n${window.location.origin}/?id=${worker.id}&pin=${attendancePin}\n\nYuk, langsung diklik link-nya ya! Pastikan untuk mengaktifkan dan menyetujui izin lokasi (GPS) di HP Anda, kemudian langsung tekan tombol check-in di dalam aplikasi.\n\nSetelah berhasil, Anda akan menerima pesan pop-up konfirmasi sukses. Selamat bekerja hari ini, dan besok jangan lupa untuk absen kembali ya agar uang makannya selalu lancar! Semangat terus dan jaga keselamatan kerja! 😊✨`;
+                                    const quickUrl = `${window.location.origin}/?id=${worker.id}&quick=true`;
+                                    const customMsg = getDeterministicReminderMessage(worker.name, worker.id, quickUrl);
                                     setSendingBotMsgId(worker.id);
                                     try {
                                       const res = await fetch("/api/wa/send-test", {
@@ -7118,7 +7140,8 @@ export default function App() {
 
                                 {(() => {
                                   const isSentToday = !!bulkSentStatus[worker.id];
-                                  const customMsg = `Halo *${worker.name}*, silakan klik link berikut untuk melakukan absen mandiri uang makan *PT. Nusantara Mineral Sukses Abadi* hari ini:\n${window.location.origin}/?id=${worker.id}&pin=${attendancePin}\n\nYuk, langsung diklik link-nya ya! Pastikan untuk mengaktifkan dan menyetujui izin lokasi (GPS) di HP Anda, kemudian langsung tekan tombol check-in di dalam aplikasi.\n\nSetelah berhasil, Anda akan menerima pesan pop-up konfirmasi sukses. Selamat bekerja hari ini, dan besok jangan lupa untuk absen kembali ya agar uang makannya selalu lancar! Semangat terus dan jaga keselamatan kerja! 😊✨`;
+                                  const quickUrl = `${window.location.origin}/?id=${worker.id}&quick=true`;
+                                  const customMsg = getDeterministicReminderMessage(worker.name, worker.id, quickUrl);
                                   const encodedMsg = encodeURIComponent(customMsg);
                                   let phoneClean = worker.phoneNumber?.replace(/[^0-9]/g, "") || "";
                                   if (phoneClean.startsWith("0")) {
@@ -7656,8 +7679,8 @@ export default function App() {
                       }
                       
                       const currentWorker = activeWorkers[currentStepIndex];
-                      const link = `${window.location.origin}/?id=${currentWorker.id}&pin=${attendancePin}`;
-                      const customMsg = `Halo *${currentWorker.name}*, silakan klik link berikut untuk melakukan absen mandiri uang makan *PT. Nusantara Mineral Sukses Abadi* hari ini:\n${link}\n\nYuk, langsung diklik link-nya ya! Pastikan untuk mengaktifkan dan menyetujui izin lokasi (GPS) di HP Anda, kemudian langsung tekan tombol check-in di dalam aplikasi.\n\nSetelah berhasil, Anda akan menerima pesan pop-up konfirmasi sukses. Selamat bekerja hari ini, dan besok jangan lupa untuk absen kembali ya agar uang makannya selalu lancar! Semangat terus dan jaga keselamatan kerja! 😊✨`;
+                      const link = `${window.location.origin}/?id=${currentWorker.id}&quick=true`;
+                      const customMsg = getDeterministicReminderMessage(currentWorker.name, currentWorker.id, link);
                       const encodedMsg = encodeURIComponent(customMsg);
                       
                       let phoneClean = currentWorker.phoneNumber?.replace(/[^0-9]/g, "") || "";
@@ -7952,8 +7975,8 @@ export default function App() {
                                 onClick={() => {
                                   const activeWorkers = workers.filter(w => w.isActive);
                                   const compiled = activeWorkers.map(w => {
-                                    const link = `${window.location.origin}/?id=${w.id}&pin=${attendancePin}`;
-                                    return `Halo *${w.name}*, silakan klik link berikut untuk melakukan absen mandiri uang makan *PT. Nusantara Mineral Sukses Abadi* hari ini:\n${link}\n\nYuk, langsung diklik link-nya ya! Pastikan untuk mengaktifkan dan menyetujui izin lokasi (GPS) di HP Anda, kemudian langsung tekan tombol check-in di dalam aplikasi.\n\nSetelah berhasil, Anda akan menerima pesan pop-up konfirmasi sukses. Selamat bekerja hari ini, dan besok jangan lupa untuk absen kembali ya agar uang makannya selalu lancar! Semangat terus dan jaga keselamatan kerja! 😊✨`;
+                                    const link = `${window.location.origin}/?id=${w.id}&quick=true`;
+                                    return getDeterministicReminderMessage(w.name, w.id, link);
                                   }).join("\n\n-------------------------\n\n");
                                   navigator.clipboard.writeText(compiled);
                                   alert("Semua format pesan WhatsApp karyawan berhasil disalin ke clipboard!");
@@ -7985,8 +8008,8 @@ export default function App() {
                         <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Daftar Pengiriman</h4>
                         <div className="border border-slate-150 rounded-xl overflow-hidden divide-y divide-slate-100">
                           {workers.filter(w => w.isActive).map((w) => {
-                                    const link = `${window.location.origin}/?id=${w.id}&pin=${attendancePin}`;
-                                    const customMsg = `Halo *${w.name}*, silakan klik link berikut untuk melakukan absen mandiri uang makan *PT. Nusantara Mineral Sukses Abadi* hari ini:\n${link}\n\nYuk, langsung diklik link-nya ya! Pastikan untuk mengaktifkan dan menyetujui izin lokasi (GPS) di HP Anda, kemudian langsung tekan tombol check-in di dalam aplikasi.\n\nSetelah berhasil, Anda akan menerima pesan pop-up konfirmasi sukses. Selamat bekerja hari ini, dan besok jangan lupa untuk absen kembali ya agar uang makannya selalu lancar! Semangat terus dan jaga keselamatan kerja! 😊✨`;
+                                    const link = `${window.location.origin}/?id=${w.id}&quick=true`;
+                                    const customMsg = getDeterministicReminderMessage(w.name, w.id, link);
                             const encodedMsg = encodeURIComponent(customMsg);
                             
                             // Sanitize phone number (remove non-digits and replace leading '0' with '62' if necessary)
