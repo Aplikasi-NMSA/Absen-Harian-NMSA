@@ -369,45 +369,45 @@ const MAX_DISTANCE_METERS = 150;
 const REMINDER_TEMPLATES = [
   (name: string, url: string) => `Halo *${name}*! 👋
 
-Sudah masuk jam kerja nih. Yuk, sempatkan waktu sebentar untuk klik tautan di bawah ini agar absensi harian Anda langsung tercatat otomatis:
+Sudah masuk jam kerja. Silakan lakukan absen mandiri uang makan harian Anda melalui tautan cepat berikut:
 👉 ${url}
 
-Pastikan GPS/lokasi di handphone Anda menyala ya saat membukanya. Terima kasih dan selamat beraktivitas! Semangat terus! ✨💼`,
+*PENTING:* Absensi ini hanya berlaku bagi karyawan yang hadir fisik di kantor Wisma NH Pasar Minggu. Sistem mendeteksi lokasi GPS Anda secara real-time. Jika Anda sedang di luar kantor atau meeting eksternal, Anda tidak dapat melakukan absen ini. Tetap jaga kesehatan dan selamat beraktivitas! 💼✨`,
 
   (name: string, url: string) => `Selamat pagi *${name}*! ☀️
 
-Semoga hari ini menyenangkan dan penuh berkah! Untuk kelancaran rekap uang makan harian Anda, silakan lakukan presensi cepat melalui link di bawah:
+Mohon segera catat kehadiran harian Anda untuk kelancaran administrasi uang makan melalui link di bawah:
 👉 ${url}
 
-Cukup klik link tersebut, sistem akan memverifikasi lokasi Anda secara instan. Terima kasih atas kerja keras Anda di lapangan! Jaga keselamatan selalu! 🛠️💪`,
+*Informasi Aturan:* Presensi wajib dilakukan langsung dari area kantor Wisma NH Pasar Minggu. Absen tidak dapat diproses apabila Anda sedang berada di luar kantor atau memiliki agenda meeting di luar. Terima kasih atas disiplin Anda, mari selalu jaga kesehatan diri! 💪🏢`,
 
-  (name: string, url: string) => `Halo Rekan *${name}*, apa kabar hari ini? 😊
+  (name: string, url: string) => `Pemberitahuan Presensi Kantor - *${name}* 📍
 
-Jangan lupa untuk mencatatkan kehadiran Anda hari ini demi kelancaran administrasi harian. Klik link di bawah ini untuk check-in instan tanpa ribet:
+Yth. Rekan Karyawan, silakan klik tautan di bawah ini untuk mencatat kehadiran harian Anda:
 👉 ${url}
 
-Selamat bekerja dan tetap utamakan keselamatan kerja di lokasi! Sukses selalu! 🚀🔥`,
+Sistem mendeteksi radius lokasi Anda secara ketat. Harap diingat bahwa absen uang makan ini hanya valid jika dilakukan langsung di dalam Wisma NH Pasar Minggu (tidak berlaku bagi yang sedang dinas luar/meeting luar). Semoga aktivitas hari ini berjalan lancar, tetap jaga kesehatan dan keselamatan kerja! 🛠️💼`,
+
+  (name: string, url: string) => `Halo *${name}*! Salam sukses untuk Anda hari ini. 🏆
+
+Sebelum beraktivitas lebih lanjut, harap klik link instan berikut untuk melakukan absen uang makan hari ini:
+👉 ${url}
+
+*Peringatan Ketentuan:* Absen ini mendeteksi titik koordinat Anda dan hanya dapat diakses dari kantor Wisma NH Pasar Minggu. Bagi yang sedang bertugas atau meeting di luar kantor, absen tidak diperkenankan. Mari jaga kesehatan dan tetap profesional dalam bertugas! 🏁🏢`,
 
   (name: string, url: string) => `Semangat pagi *${name}*! 🌟
 
-Mari kita mulai hari kerja dengan penuh energi positif! Agar data allowance-meal Anda tercatat dengan rapi, silakan absen dengan mengklik link instan berikut:
+Untuk pencatatan uang makan harian yang akurat, silakan lakukan check-in melalui tautan instan di bawah ini:
 👉 ${url}
 
-Hanya butuh beberapa detik saja! Terima kasih banyak atas dedikasinya untuk tim! 💼🤝`,
+*Harap diperhatikan:* Absensi ini dirancang khusus untuk karyawan yang bekerja langsung dari kantor Wisma NH Pasar Minggu. Bagi karyawan yang berada di luar area kantor atau meeting luar, akses absen tidak berlaku. Jaga kondisi tubuh agar selalu prima dan selamat bekerja! 🤝💼`,
 
-  (name: string, url: string) => `Pemberitahuan Presensi Harian - *${name}* 📍
+  (name: string, url: string) => `Pemberitahuan Kehadiran Wisma NH - *${name}* 🏢
 
-Yth. Rekan Karyawan, silakan klik tautan presensi di bawah untuk mencatat kehadiran Anda pada hari kerja ini:
+Mari mulai hari kerja ini dengan disiplin. Segera verifikasi kehadiran Anda dengan mengetuk link di bawah:
 👉 ${url}
 
-Sistem akan memproses titik lokasi Anda dalam hitungan detik. Semoga pekerjaan hari ini berjalan dengan lancar dan aman! Terus berikan yang terbaik! 👍📦`,
-
-  (name: string, url: string) => `Halo *${name}*! Salam sukses untuk Anda hari ini! 🏆
-
-Sebelum memulai aktivitas kerja lebih jauh, mohon kesediaan waktunya untuk melakukan absen harian dengan mengetuk link di bawah ini:
-👉 ${url}
-
-Satu klik untuk mempermudah pencatatan uang makan Anda. Terima kasih, tetap fokus dan selalu jaga keselamatan kerja! 🏁❤️`
+*Ketentuan Absensi:* Sesuai aturan, absensi uang makan hanya dapat dilakukan secara fisik di area kantor Wisma NH Pasar Minggu. Segala bentuk absensi di luar kantor (termasuk saat meeting luar) tidak akan terverifikasi oleh sistem lokasi. Terima kasih atas pengertiannya, mari utamakan kesehatan dan keselamatan! 📈❤️`
 ];
 
 function getRandomReminderMessage(name: string, url: string): string {
