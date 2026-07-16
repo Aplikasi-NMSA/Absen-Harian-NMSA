@@ -1652,7 +1652,12 @@ async function startServer() {
   });
 
   // Set up internal background cron-reminder trigger every 60 seconds (1 minute)
+  let isCronRunning = false;
   setInterval(async () => {
+    if (isCronRunning) {
+      console.log("[Internal Auto Pinger] Previous cron execution is still in progress. Skipping this tick.");
+      return;
+    }
     try {
       const state = readState();
       const todayYMD = getJakartaDateStr();
@@ -1669,8 +1674,27 @@ async function startServer() {
       const alreadySentToday = state.lastCronSentDate === todayYMD;
 
       if (isTimeTrigger && !alreadySentToday) {
+        isCronRunning = true;
+        
+        const hostOrigin = state.lastHostOrigin || "";
+        const isDevOrPreview = hostOrigin.includes("ais-pre-") || hostOrigin.includes("ais-dev-") || hostOrigin.includes("localhost") || hostOrigin.includes("127.0.0.1") || process.env.NODE_ENV !== "production";
+
+        if (isDevOrPreview) {
+          console.log(`[Internal Auto Pinger] Skipped scheduling on Dev/Preview environment to prevent duplicate spam. Host: ${hostOrigin}`);
+          state.lastCronStatus = `Dilewati otomatis (Sistem Internal): Dinonaktifkan di lingkungan Preview/Development (${hostOrigin || "Local"}) untuk mencegah duplikasi pengingat dengan server live.`;
+          state.lastCronSentDate = todayYMD;
+          writeState(state);
+          isCronRunning = false;
+          return;
+        }
+
         console.log(`[Internal Auto Pinger] Time matches (${jktTimeString} >= ${scheduledTime}). Triggering automatic reminder...`);
         
+        // Save immediately to disk to prevent other ticks/concurrent triggers while this slow sending loop is executing
+        state.lastCronSentDate = todayYMD;
+        state.lastCronStatus = "Sedang mengirim pengingat otomatis harian...";
+        writeState(state);
+
         // Check if today is weekend or holiday
         const holidayCheck = await checkIsHolidayOrWeekend(todayYMD);
         if (holidayCheck.isBlocked) {
@@ -1678,6 +1702,7 @@ async function startServer() {
           state.lastCronSentDate = todayYMD;
           writeState(state);
           console.log(`[Internal Auto Pinger] Skipped today because of: ${holidayCheck.reason}`);
+          isCronRunning = false;
           return;
         }
 
@@ -1687,6 +1712,7 @@ async function startServer() {
           state.lastCronStatus = `Gagal mengirim pengingat otomatis (Sistem Internal): WhatsApp Bot belum terhubung.`;
           writeState(state);
           console.log(`[Internal Auto Pinger] WhatsApp Bot not connected. Skipped.`);
+          isCronRunning = false;
           return;
         }
 
@@ -1704,10 +1730,11 @@ async function startServer() {
           state.lastCronSentDate = todayYMD;
           writeState(state);
           console.log(`[Internal Auto Pinger] All workers have already checked in.`);
+          isCronRunning = false;
           return;
         }
 
-        const hostOrigin = state.lastHostOrigin || "https://ais-pre-e7m6l6ql7mfgk6e4xkr56y-958431568317.asia-east1.run.app";
+        const hostLink = hostOrigin || "https://ais-pre-e7m6l6ql7mfgk6e4xkr56y-958431568317.asia-east1.run.app";
 
         let sentCount = 0;
         let failedCount = 0;
@@ -1719,7 +1746,7 @@ async function startServer() {
           }
 
           // Generate instant check-in URL with quick=true
-          const loginUrl = `${hostOrigin}/?id=${worker.id}&quick=true`;
+          const loginUrl = `${hostLink}/?id=${worker.id}&quick=true`;
           
           // Select a random anti-spam message template
           const message = getRandomReminderMessage(worker.name, loginUrl);
@@ -1742,9 +1769,12 @@ async function startServer() {
         state.lastCronSentDate = todayYMD;
         writeState(state);
         console.log(`[Internal Auto Pinger] Successfully sent reminders to ${sentCount} workers.`);
+        
+        isCronRunning = false;
       }
     } catch (err) {
       console.error("Error in internal background scheduler interval:", err);
+      isCronRunning = false;
     }
   }, 60000);
 }
