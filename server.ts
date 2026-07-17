@@ -600,7 +600,7 @@ app.post("/api/self-attend", async (req, res) => {
 // POST Quick/Instant Attendance Check-in via Bot link
 app.post("/api/quick-self-attend", async (req, res) => {
   try {
-    const { workerId, date, latitude, longitude, status } = req.body;
+    const { workerId, date, latitude, longitude, status, reason } = req.body;
     if (!workerId || !date) {
       return res.status(400).json({ error: "ID karyawan dan tanggal wajib diisi." });
     }
@@ -723,7 +723,7 @@ app.post("/api/quick-self-attend", async (req, res) => {
           r.customStatus[date] = status;
 
           if (!r.reasons) r.reasons = {};
-          r.reasons[date] = "Dipilih via tautan instan";
+          r.reasons[date] = reason || "Dipilih via tautan instan";
 
           recordUpdated = true;
           break;
@@ -735,7 +735,7 @@ app.post("/api/quick-self-attend", async (req, res) => {
           workerId,
           attendance: { [date]: false },
           customStatus: { [date]: status },
-          reasons: { [date]: "Dipilih via tautan instan" },
+          reasons: { [date]: reason || "Dipilih via tautan instan" },
           dailyAllowance: 25000
         });
       }

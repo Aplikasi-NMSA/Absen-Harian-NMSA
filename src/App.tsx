@@ -1157,8 +1157,10 @@ export default function App() {
   const [quickSubmitState, setQuickSubmitState] = useState<"idle" | "submitting" | "success" | "error" | "outside">("idle");
   const [quickSubmitMessage, setQuickSubmitMessage] = useState<string>("");
   const [selectedQuickStatus, setSelectedQuickStatus] = useState<string>("");
+  const [showReasonInputFor, setShowReasonInputFor] = useState<string | null>(null);
+  const [customReasonText, setCustomReasonText] = useState<string>("");
 
-  const triggerQuickCheckIn = async (status: string, overrideCoords?: { latitude: number; longitude: number }) => {
+  const triggerQuickCheckIn = async (status: string, overrideCoords?: { latitude: number; longitude: number }, customReason?: string) => {
     if (!selfWorkerId) return;
     setQuickSubmitState("submitting");
     setSelectedQuickStatus(status);
@@ -1173,7 +1175,8 @@ export default function App() {
           date: todayYMD,
           latitude: activeCoords ? activeCoords.latitude : undefined,
           longitude: activeCoords ? activeCoords.longitude : undefined,
-          status: status
+          status: status,
+          reason: customReason
         })
       });
       const data = await response.json();
@@ -2610,8 +2613,71 @@ export default function App() {
               </motion.div>
             )}
 
+            {/* INPUT REASON STATE FOR MEETING/DINAS */}
+            {showReasonInputFor !== null && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="w-full bg-slate-900/60 border border-slate-800/80 rounded-3xl p-6 shadow-2xl space-y-6 max-w-md mx-auto text-left"
+              >
+                <div className="flex items-center gap-3 border-b border-slate-800 pb-3">
+                  <div className="p-2 bg-emerald-500/10 text-emerald-400 rounded-xl">
+                    <Users className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-extrabold text-white">Informasi Dinas / Meeting</h3>
+                    <p className="text-[10px] text-slate-400">Harap masukkan alasan & detail tujuan meeting luar</p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="block text-[11px] font-bold text-slate-300 uppercase tracking-wider">
+                    Detail Lokasi & Agenda (Wajib)
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={customReasonText}
+                    onChange={(e) => setCustomReasonText(e.target.value)}
+                    placeholder="Contoh: Meeting koordinasi dengan mitra PT. Nusantara Mineral di Kantor Wisma, membahas operasional jam 10.00."
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-white placeholder-slate-600 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none resize-none transition"
+                  />
+                  <div className="flex justify-between text-[10px] text-slate-500">
+                    <span>Berikan informasi se-jelas mungkin</span>
+                    <span className={customReasonText.trim().length >= 10 ? "text-emerald-400 font-bold" : "text-rose-400"}>
+                      {customReasonText.trim().length} / Min. 10 Karakter
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowReasonInputFor(null);
+                      setCustomReasonText("");
+                    }}
+                    className="py-3 rounded-xl border border-slate-800 hover:bg-slate-800/50 text-slate-400 font-bold text-xs transition cursor-pointer text-center"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="button"
+                    disabled={customReasonText.trim().length < 10}
+                    onClick={() => {
+                      triggerQuickCheckIn(showReasonInputFor, undefined, customReasonText.trim());
+                      setShowReasonInputFor(null);
+                      setCustomReasonText("");
+                    }}
+                    className="py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs transition cursor-pointer text-center shadow-lg shadow-emerald-600/10"
+                  >
+                    Kirim Absensi
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
             {/* OUTSIDE OFFICE RANGE STATE (Shows Choices) */}
-            {quickSubmitState === "outside" && (
+            {quickSubmitState === "outside" && showReasonInputFor === null && (
               <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
@@ -2640,7 +2706,14 @@ export default function App() {
                   ].map((opt) => (
                     <button
                       key={opt.status}
-                      onClick={() => triggerQuickCheckIn(opt.status)}
+                      onClick={() => {
+                        if (opt.status === "Meeting") {
+                          setShowReasonInputFor("Meeting");
+                          setCustomReasonText("");
+                        } else {
+                          triggerQuickCheckIn(opt.status);
+                        }
+                      }}
                       className={`p-3 rounded-2xl border transition duration-150 cursor-pointer flex flex-col justify-between h-[100px] text-left relative overflow-hidden group ${opt.color}`}
                     >
                       <div className="flex justify-between items-start w-full">
@@ -2665,29 +2738,11 @@ export default function App() {
                     <ArrowRight className="w-4 h-4 text-slate-500 group-hover:translate-x-1 transition-transform" />
                   </button>
                 </div>
-
-                <div className="border-t border-slate-800 pt-4 flex flex-col gap-2">
-                  <p className="text-[10px] text-slate-500">
-                    Salah membaca koordinat GPS? Pastikan Anda berada di luar ruangan atau ketuk tombol di bawah:
-                  </p>
-                  <button
-                    onClick={() => {
-                      const officeCoords = { latitude: OFFICE_LAT, longitude: OFFICE_LON };
-                      setUserCoords(officeCoords);
-                      setGeoDistance(0);
-                      setGeoStatus("available");
-                      triggerQuickCheckIn("Hadir", officeCoords);
-                    }}
-                    className="text-[11px] font-bold text-indigo-400 hover:text-indigo-300 transition underline cursor-pointer font-sans"
-                  >
-                    Gunakan Koordinat Kantor Default (Bypass GPS)
-                  </button>
-                </div>
               </motion.div>
             )}
 
             {/* ERROR / EXCEPTION / GPS DENIED STATE */}
-            {(geoStatus === "denied" || geoStatus === "error" || quickSubmitState === "error") && (
+            {(geoStatus === "denied" || geoStatus === "error" || quickSubmitState === "error") && showReasonInputFor === null && (
               <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
@@ -2714,19 +2769,6 @@ export default function App() {
                     <RefreshCw className="w-4 h-4 animate-spin" />
                     <span>Coba Lagi Akses GPS</span>
                   </button>
-                  <button
-                    onClick={() => {
-                      const officeCoords = { latitude: OFFICE_LAT, longitude: OFFICE_LON };
-                      setUserCoords(officeCoords);
-                      setGeoDistance(0);
-                      setGeoStatus("available");
-                      triggerQuickCheckIn("Hadir", officeCoords);
-                    }}
-                    className="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold py-3 rounded-xl transition duration-150 flex items-center justify-center gap-2 cursor-pointer text-xs uppercase tracking-wider font-display"
-                  >
-                    <MapPin className="w-4 h-4" />
-                    <span>Bypass GPS (Titik Kantor Default)</span>
-                  </button>
                 </div>
 
                 <div className="border-t border-slate-800 pt-5 space-y-3">
@@ -2742,7 +2784,14 @@ export default function App() {
                     ].map((opt) => (
                       <button
                         key={opt.status}
-                        onClick={() => triggerQuickCheckIn(opt.status)}
+                        onClick={() => {
+                          if (opt.status === "Meeting") {
+                            setShowReasonInputFor("Meeting");
+                            setCustomReasonText("");
+                          } else {
+                            triggerQuickCheckIn(opt.status);
+                          }
+                        }}
                         className="py-2.5 rounded-xl border border-slate-800 bg-slate-950 hover:bg-slate-900 transition text-xs font-bold text-slate-300 cursor-pointer"
                       >
                         {opt.label}
@@ -3195,14 +3244,9 @@ export default function App() {
                                 }
                               </p>
                               {!isNear && (
-                                <button
-                                  type="button"
-                                  onClick={useOfficeLocationDefault}
-                                  className="w-full bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold py-2.5 rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-indigo-600/20"
-                                >
-                                  <MapPin className="w-3.5 h-3.5" />
-                                  <span>Gunakan Titik Kantor Default (Bypass GPS)</span>
-                                </button>
+                                <p className="text-[10px] text-rose-300 font-semibold bg-rose-500/10 p-2 rounded-lg border border-rose-500/20">
+                                  Presensi dinonaktifkan. Silakan pastikan GPS aktif dan Anda berada langsung di area Wisma NH Pasar Minggu.
+                                </p>
                               )}
                             </div>
                           );
@@ -3226,14 +3270,6 @@ export default function App() {
                             >
                               <RefreshCw className="w-3.5 h-3.5" />
                               <span>Coba Lagi Akses GPS</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={useOfficeLocationDefault}
-                              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold py-2.5 rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-indigo-600/20"
-                            >
-                              <MapPin className="w-3.5 h-3.5" />
-                              <span>Gunakan Titik Kantor Default (Bypass GPS)</span>
                             </button>
                           </div>
                         </div>
